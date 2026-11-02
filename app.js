@@ -1,7 +1,7 @@
 'use strict';
 /* Mis Finanzas — app de carga de gastos e ingresos, sin conexión, sincronizada con Google Sheets */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const LS_DATA = 'fin.data.v1';
 const LS_SET = 'fin.settings.v1';
 const TABLES = ['Movimientos', 'Cuentas', 'Categorias', 'Fijos', 'Config'];
@@ -572,7 +572,37 @@ function openSettings() {
     <div class="card" style="margin-top:16px">
       <div class="small muted">Última sincronización: ${data.lastSync ? new Date(data.lastSync).toLocaleString('es-AR') : 'nunca'}<br>Cambios sin subir: ${dirty}<br>Movimientos guardados: ${movs().length}${ui.lastError ? '<br><span class="neg">Último error: ' + esc(ui.lastError) + '</span>' : ''}<br>Versión ${APP_VERSION}</div>
       <div class="btns"><button class="btn secondary small" data-action="sync" style="width:100%">Sincronizar ahora</button><button class="btn secondary small" data-action="export" style="width:100%">Exportar CSV</button></div>
+      <button class="btn secondary small" data-action="import" style="width:100%;margin-top:10px">Importar datos (archivo .json)</button>
+      <input type="file" id="importFile" accept=".json,application/json" hidden>
     </div>`);
+}
+/* Importa un archivo con filas para una o más tablas: { "Cuentas": [...], "Movimientos": [...], ... }.
+   Cada fila necesita un "id": si ya existe se reemplaza, así que importar dos veces no duplica. */
+function importData(text) {
+  let obj;
+  try { obj = JSON.parse(text); } catch (e) { toast('El archivo no es un JSON válido'); return; }
+  const now = Date.now();
+  const counts = [];
+  TABLES.forEach(t => {
+    const list = Array.isArray(obj[t]) ? obj[t] : [];
+    let n = 0;
+    list.forEach(r => {
+      if (!r || r.id === undefined || r.id === null || r.id === '') return;
+      const row = normalize(t, r);
+      row.modificado = now;
+      if (t === 'Movimientos') { row.creado = num(row.creado) || now; row.borrado = row.borrado ? 1 : 0; }
+      data[t][row.id] = row;
+      data.dirty[t][row.id] = true;
+      n++;
+    });
+    if (n) counts.push(n + ' ' + t.toLowerCase());
+  });
+  if (!counts.length) { toast('El archivo no tiene datos para importar'); return; }
+  saveData();
+  closeSheet();
+  toast('Importado: ' + counts.join(', '));
+  render();
+  sync();
 }
 function saveSettingsForm(form) {
   const fd = new FormData(form);
@@ -684,6 +714,7 @@ document.addEventListener('click', e => {
   else if (act === 'sync') { if (!settings.url) openSettings(); else sync(); }
   else if (act === 'settings') openSettings();
   else if (act === 'export') exportCSV();
+  else if (act === 'import') document.getElementById('importFile').click();
   else if (act === 'account') openAccount(a.dataset.id);
   else if (act === 'edit-account') openAccountEdit(a.dataset.id);
   else if (act === 'new-account') openAccountEdit('');
@@ -716,6 +747,13 @@ document.addEventListener('submit', e => {
   else if (fid === 'adjForm') saveAdjust(f);
   else if (fid === 'accForm') saveAccount(f);
   else if (fid === 'setForm') saveSettingsForm(f);
+});
+document.addEventListener('change', e => {
+  if (e.target.id !== 'importFile' || !e.target.files || !e.target.files[0]) return;
+  const reader = new FileReader();
+  reader.onload = () => importData(String(reader.result || ''));
+  reader.onerror = () => toast('No se pudo leer el archivo');
+  reader.readAsText(e.target.files[0], 'utf-8');
 });
 document.addEventListener('input', e => {
   const k = e.target.dataset && e.target.dataset.input;

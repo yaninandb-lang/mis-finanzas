@@ -1,0 +1,4 @@
+# Nunca subir datos personales
+_tmp-*
+*.xlsx
+datos-*.json
