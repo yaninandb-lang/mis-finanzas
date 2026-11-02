@@ -1,7 +1,7 @@
 'use strict';
 /* Mis Finanzas — app de carga de gastos e ingresos, sin conexión, sincronizada con Google Sheets */
 
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.2.0';
 const LS_DATA = 'fin.data.v1';
 const LS_SET = 'fin.settings.v1';
 const TABLES = ['Movimientos', 'Cuentas', 'Categorias', 'Fijos', 'Config'];
@@ -190,6 +190,36 @@ function pendientesActuales() {
   const prev = pendientes(addMonths(mk, -1)).filter(p => p.kind === 'fijo');
   return prev.concat(pendientes(mk));
 }
+/* Los gastos fijos que se pagan con tarjeta se agrupan en un "resumen" por tarjeta y mes:
+   se registran todos juntos cuando llega el resumen, antes de pagarlo. */
+function esFijoTarjeta(p) {
+  if (p.kind !== 'fijo' || p.f.tipo === 'Ingreso' || p.f.tipo === 'Transferencia') return false;
+  const c = cuenta(p.f.cuenta);
+  return !!c && c.tipo === 'tarjeta';
+}
+function agrupar(list) {
+  const out = [], groups = {};
+  list.forEach(p => {
+    if (!esFijoTarjeta(p)) { out.push(p); return; }
+    const mk = monthKey(p.fecha);
+    const k = 'grupo:' + p.f.cuenta + '|' + mk;
+    if (!groups[k]) {
+      const c = cuenta(p.f.cuenta);
+      const dia = Math.min(num(c.dia_vencimiento) || num(p.f.dia) || 1, daysIn(mk));
+      groups[k] = { kind: 'grupo', key: k, c, mk, fecha: mk + '-' + String(dia).padStart(2, '0'), items: [], total: 0 };
+      out.push(groups[k]);
+    }
+    groups[k].items.push(p);
+    groups[k].total += toARS(p.f.monto, p.f.moneda);
+  });
+  const rank = { grupo: 0, fijo: 1, resumen: 2 };
+  return out.sort((a, b) => a.fecha.localeCompare(b.fecha) || rank[a.kind] - rank[b.kind]);
+}
+function putMany(t, list) {
+  const now = Date.now();
+  list.forEach(o => { o.modificado = now; data[t][o.id] = o; data.dirty[t][o.id] = true; });
+  saveData(); refreshChrome(); queueSync();
+}
 
 /* ---------- Render general ---------- */
 const VIEWS = { cargar: viewCargar, movs: viewMovs, pend: viewPend, panel: viewPanel, cuentas: viewCuentas };
@@ -202,7 +232,7 @@ function render() {
   refreshChrome();
 }
 function refreshChrome() {
-  const n = pendientesActuales().filter(p => p.fecha <= addDays(today(), 3)).length;
+  const n = agrupar(pendientesActuales()).filter(p => p.fecha <= addDays(today(), 3)).length;
   const badge = document.getElementById('pendBadge');
   badge.hidden = !n; badge.textContent = n;
   const btn = document.getElementById('syncBtn');
@@ -385,12 +415,17 @@ function monthNav() {
 
 /* ---------- Vista: Pendientes ---------- */
 function viewPend() {
-  const l = pendientesActuales();
-  let html = `<p class="muted small" style="margin-top:0">Gastos fijos, ingresos previstos y resúmenes de tarjeta de este mes. Confirmá el importe cuando lo pagues o lo cobres.</p>`;
+  const l = agrupar(pendientesActuales());
+  let html = `<p class="muted small" style="margin-top:0">Gastos fijos, ingresos previstos y resúmenes de tarjeta. Cuando llega el resumen de una tarjeta: primero <b>Registrar</b> sus consumos fijos y después <b>Pagar</b> el resumen.</p>`;
   if (!l.length) return html + `<div class="empty">No hay pendientes. ¡Todo al día!</div>`;
   const hoy = today();
   html += `<div class="card" style="padding:4px 12px"><ul class="list">` + l.map(p => {
     const vencido = p.fecha < hoy;
+    if (p.kind === 'grupo') {
+      return `<li><div class="grow"><div class="t">Consumos fijos ${esc(p.c.nombre)} · ${esc(monthName(p.mk))}</div><div class="s">${p.items.length} consumos · ${money(p.total)} ${vencido ? '<span class="tag" style="color:var(--danger)">vencido</span>' : ''}</div></div>
+        <button class="btn small secondary" data-action="skip-group" data-key="${esc(p.key)}">Omitir</button>
+        <button class="btn small" data-action="open-group" data-key="${esc(p.key)}">Registrar</button></li>`;
+    }
     if (p.kind === 'resumen') {
       return `<li><div class="grow"><div class="t">Pagar resumen ${esc(p.c.nombre)}</div><div class="s">${shortDate(p.fecha)} · Deuda cargada: ${money(p.deuda)}${p.deudaUSD > 0 ? ' + ' + money(p.deudaUSD, 'USD') : ''} ${vencido ? '<span class="tag" style="color:var(--danger)">vencido</span>' : ''}</div></div>
         <button class="btn small" data-action="pay-card" data-key="${esc(p.key)}">Pagar</button></li>`;
@@ -403,6 +438,61 @@ function viewPend() {
   return html;
 }
 function findPend(key) { return pendientesActuales().find(p => p.key === key); }
+function findGroup(key) { return agrupar(pendientesActuales()).find(p => p.key === key); }
+function openGroup(key) {
+  const g = findGroup(key); if (!g) return;
+  const hoy = today();
+  sheet(`
+    <h3>Resumen ${esc(g.c.nombre)} · ${esc(monthName(g.mk))}</h3>
+    <p class="muted small" style="margin-top:0">Ajustá cada monto según el resumen. Los que destildes quedan pendientes. Después de registrarlos, pagá el resumen desde Pendientes.</p>
+    <form id="grpForm" autocomplete="off">
+      <input type="hidden" name="key" value="${esc(g.key)}">
+      <label class="f">Fecha del resumen</label>
+      <input class="in" type="date" name="fecha" value="${esc(g.fecha <= hoy ? hoy : g.fecha)}" required>
+      <ul class="list" style="margin-top:8px">${g.items.map(p => `
+        <li data-item="${esc(p.key)}">
+          <input type="checkbox" class="gsel" checked style="width:20px;height:20px;flex:none" aria-label="Incluir ${esc(p.f.concepto)}">
+          <div class="grow"><div class="t">${esc(p.f.concepto)}</div><div class="s">${esc(p.f.categoria)}</div></div>
+          <input class="in gmonto" inputmode="decimal" value="${esc(String(num(p.f.monto)).replace('.', ','))}" style="width:120px;text-align:right">
+          <span class="tag">${esc(p.f.moneda || 'ARS')}</span>
+        </li>`).join('')}</ul>
+      <div class="row between" style="margin-top:10px"><b>Total</b><b class="amt" id="grpTotal">${money(g.total)}</b></div>
+      <div class="btns"><button type="button" class="btn secondary" data-action="close-sheet">Cancelar</button><button class="btn" type="submit">Registrar</button></div>
+    </form>`);
+}
+function grpTotal() {
+  const form = document.getElementById('grpForm'); if (!form) return;
+  const g = findGroup(form.querySelector('[name="key"]').value); if (!g) return;
+  let t = 0;
+  form.querySelectorAll('[data-item]').forEach(li => {
+    if (!li.querySelector('.gsel').checked) return;
+    const p = g.items.find(x => x.key === li.dataset.item);
+    const v = parseMonto(li.querySelector('.gmonto').value);
+    if (p && isFinite(v)) t += toARS(v, p.f.moneda);
+  });
+  document.getElementById('grpTotal').textContent = money(t);
+}
+function saveGroup(form) {
+  const g = findGroup(form.querySelector('[name="key"]').value); if (!g) { closeSheet(); return; }
+  const fecha = form.querySelector('[name="fecha"]').value || today();
+  const nuevos = [];
+  form.querySelectorAll('[data-item]').forEach(li => {
+    if (!li.querySelector('.gsel').checked) return;
+    const p = g.items.find(x => x.key === li.dataset.item); if (!p) return;
+    const v = parseMonto(li.querySelector('.gmonto').value);
+    if (!isFinite(v) || v === 0) return;
+    nuevos.push(newMov({ tipo: 'Gasto', categoria: p.f.categoria, concepto: p.f.concepto, monto: v, moneda: p.f.moneda || 'ARS', cuenta: p.f.cuenta, fecha, fijo_id: p.key }));
+  });
+  if (!nuevos.length) { toast('No hay consumos seleccionados'); return; }
+  putMany('Movimientos', nuevos);
+  closeSheet(); toast(nuevos.length + ' consumos registrados en ' + g.c.nombre); render();
+}
+function skipGroup(key) {
+  const g = findGroup(key); if (!g) return;
+  if (!confirm('¿Omitir los ' + g.items.length + ' consumos fijos de ' + g.c.nombre + ' de ' + monthName(g.mk) + '? (por ejemplo, si ya están incluidos en la deuda inicial de la tarjeta)')) return;
+  putMany('Movimientos', g.items.map(p => newMov({ tipo: 'Omitido', concepto: p.f.concepto, categoria: p.f.categoria, monto: 0, cuenta: p.f.cuenta, fijo_id: p.key, fecha: p.fecha })));
+  toast('Consumos de ' + g.c.nombre + ' omitidos'); render();
+}
 
 /* ---------- Vista: Panel ---------- */
 function viewPanel() {
@@ -473,9 +563,11 @@ function evolucion(mk) {
 function proximos() {
   const hoy = today(), lim = addDays(hoy, 20);
   const mk = monthKey(hoy);
-  const l = pendientes(mk).concat(pendientes(addMonths(mk, 1))).filter(p => p.fecha <= lim && (p.kind === 'resumen' || p.f.tipo !== 'Ingreso'));
+  const l = agrupar(pendientes(mk).concat(pendientes(addMonths(mk, 1)))).filter(p => p.fecha <= lim && (p.kind !== 'fijo' || p.f.tipo !== 'Ingreso'));
   if (!l.length) return '<div class="muted small">Nada en los próximos 20 días.</div>';
-  return `<ul class="list">` + l.map(p => `<li><div class="grow"><div class="t">${esc(p.kind === 'resumen' ? 'Resumen ' + p.c.nombre : p.f.concepto)}</div><div class="s">${shortDate(p.fecha)}${p.fecha < hoy ? ' · vencido' : ''}</div></div><div class="amt">${p.kind === 'resumen' ? money(p.deuda) : money(p.f.monto, p.f.moneda)}</div></li>`).join('') + `</ul>`;
+  const titulo = p => p.kind === 'resumen' ? 'Pagar resumen ' + p.c.nombre : (p.kind === 'grupo' ? 'Consumos fijos ' + p.c.nombre : p.f.concepto);
+  const monto = p => p.kind === 'resumen' ? money(p.deuda) : (p.kind === 'grupo' ? money(p.total) : money(p.f.monto, p.f.moneda));
+  return `<ul class="list">` + l.map(p => `<li><div class="grow"><div class="t">${esc(titulo(p))}</div><div class="s">${shortDate(p.fecha)}${p.fecha < hoy ? ' · vencido' : ''}</div></div><div class="amt">${monto(p)}</div></li>`).join('') + `</ul>`;
 }
 
 /* ---------- Vista: Cuentas ---------- */
@@ -739,6 +831,8 @@ document.addEventListener('click', e => {
     if (f.tipo === 'Transferencia') openTransferForm({ desde: f.cuenta, monto: f.monto, concepto: f.concepto, fijo_id: p.key, fecha: p.fecha <= today() ? today() : p.fecha });
     else openMovForm({ tipo: f.tipo || 'Gasto', categoria: f.categoria, concepto: f.concepto, monto: f.monto, moneda: f.moneda || 'ARS', cuenta: f.cuenta, fijo_id: p.key, fecha: p.fecha <= today() ? today() : p.fecha });
   }
+  else if (act === 'open-group') openGroup(a.dataset.key);
+  else if (act === 'skip-group') skipGroup(a.dataset.key);
   else if (act === 'skip-fijo') {
     const p = findPend(a.dataset.key); if (!p) return;
     put('Movimientos', newMov({ tipo: 'Omitido', concepto: p.f.concepto, categoria: p.f.categoria, monto: 0, fijo_id: p.key, fecha: p.fecha }));
@@ -762,8 +856,10 @@ document.addEventListener('submit', e => {
   else if (fid === 'adjForm') saveAdjust(f);
   else if (fid === 'accForm') saveAccount(f);
   else if (fid === 'setForm') saveSettingsForm(f);
+  else if (fid === 'grpForm') saveGroup(f);
 });
 document.addEventListener('change', e => {
+  if (e.target.classList && e.target.classList.contains('gsel')) { grpTotal(); return; }
   if (e.target.id !== 'importFile' || !e.target.files || !e.target.files[0]) return;
   const reader = new FileReader();
   reader.onload = () => importData(String(reader.result || ''));
@@ -771,6 +867,7 @@ document.addEventListener('change', e => {
   reader.readAsText(e.target.files[0], 'utf-8');
 });
 document.addEventListener('input', e => {
+  if (e.target.classList && e.target.classList.contains('gmonto')) { grpTotal(); return; }
   const k = e.target.dataset && e.target.dataset.input;
   if (k === 'movFilter') {
     ui.movFilter = e.target.value;

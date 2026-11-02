@@ -1,6 +1,6 @@
 /* Service worker: guarda la app en el teléfono para que abra sin conexión.
    Los datos no pasan por acá: viven en el almacenamiento local y se sincronizan con Google. */
-const CACHE = 'mis-finanzas-v1.1.1';
+const CACHE = 'mis-finanzas-v1.2.0';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {
