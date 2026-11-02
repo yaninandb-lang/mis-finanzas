@@ -1,7 +1,7 @@
 'use strict';
 /* Mis Finanzas — app de carga de gastos e ingresos, sin conexión, sincronizada con Google Sheets */
 
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.3.0';
 const LS_DATA = 'fin.data.v1';
 const LS_SET = 'fin.settings.v1';
 const TABLES = ['Movimientos', 'Cuentas', 'Categorias', 'Fijos', 'Config'];
@@ -215,6 +215,37 @@ function agrupar(list) {
   const rank = { grupo: 0, fijo: 1, resumen: 2 };
   return out.sort((a, b) => a.fecha.localeCompare(b.fecha) || rank[a.kind] - rank[b.kind]);
 }
+function mesesEntre(a, b) { const [y1, m1] = a.split('-').map(Number); const [y2, m2] = b.split('-').map(Number); return (y2 - y1) * 12 + (m2 - m1); }
+/* Nombre de una cuota para un mes: "Heladera (cuota 2/6)". Sólo para compras en cuotas cargadas desde la app (id "c-…"). */
+function nombreCuota(f, mk) {
+  if (!String(f.id).startsWith('c-') || !f.desde || !f.hasta) return f.concepto;
+  const n = mesesEntre(monthKey(f.desde), monthKey(f.hasta)) + 1;
+  const k = mesesEntre(monthKey(f.desde), mk) + 1;
+  return String(f.concepto).replace(/ \(\d+ cuotas\)$/, '') + ' (cuota ' + k + '/' + n + ')';
+}
+/* Cuotas de tarjeta que todavía no se registraron, desde este mes hasta su fin */
+function cuotasFuturas(cardId) {
+  const done = new Set(movs().filter(m => m.fijo_id).map(m => m.fijo_id));
+  const mk0 = monthKey(today());
+  let total = 0;
+  fijos().forEach(f => {
+    if (!f.hasta || (cardId && f.cuenta !== cardId)) return;
+    const c = cuenta(f.cuenta); if (!c || c.tipo !== 'tarjeta') return;
+    let mk = f.desde && monthKey(f.desde) > mk0 ? monthKey(f.desde) : mk0;
+    for (let i = 0; i < 120 && mk <= monthKey(f.hasta); i++, mk = addMonths(mk, 1)) {
+      if (!done.has(f.id + '|' + mk)) total += toARS(f.monto, f.moneda);
+    }
+  });
+  return total;
+}
+function cuotaInfo() {
+  const el = document.getElementById('cuotaInfo'); if (!el) return;
+  const n = parseInt((document.getElementById('fCuotas') || {}).value, 10) || 1;
+  const monto = parseMonto((document.getElementById('fMonto') || {}).value);
+  const primera = (document.getElementById('fPrimera') || {}).value;
+  if (n <= 1 || !isFinite(monto) || !primera) { el.textContent = n > 1 ? '' : 'Con 1 cuota el gasto se registra hoy en la tarjeta.'; return; }
+  el.textContent = n + ' cuotas de ' + money(monto / n) + ' · de ' + monthName(primera) + ' a ' + monthName(addMonths(primera, n - 1)) + '. Se suman a cada resumen; ponés el monto total de la compra.';
+}
 function putMany(t, list) {
   const now = Date.now();
   list.forEach(o => { o.modificado = now; data[t][o.id] = o; data.dirty[t][o.id] = true; });
@@ -317,6 +348,14 @@ function openMovForm(opts) {
       <label class="f">${tipo === 'Gasto' ? 'Medio de pago' : 'Cuenta donde entra'}</label>
       <div class="chips" id="medioChips">${medios.map(c => `<button type="button" class="chip ${c.id === def ? 'active' : ''}" data-medio="${esc(c.id)}">${esc(c.nombre)}</button>`).join('') || '<span class="muted small">Sin cuentas: agregalas en Cuentas.</span>'}</div>
       <input type="hidden" name="cuenta" value="${esc(def)}">
+      ${isNew && tipo === 'Gasto' && !m.fijo_id ? `
+      <div id="cuotasBox" ${cuenta(def) && cuenta(def).tipo === 'tarjeta' ? '' : 'hidden'}>
+        <div class="row" style="gap:10px">
+          <div style="flex:0 0 96px"><label class="f" for="fCuotas">Cuotas</label><input id="fCuotas" class="in" name="cuotas" inputmode="numeric" value="1"></div>
+          <div class="grow"><label class="f" for="fPrimera">Primera cuota en el resumen de</label><input id="fPrimera" class="in" type="month" name="primera" value="${esc(addMonths(monthKey(today()), 1))}"></div>
+        </div>
+        <div id="cuotaInfo" class="small muted" style="margin-top:6px"></div>
+      </div>` : ''}
       <label class="f" for="fConcepto">Concepto (opcional)</label>
       <input id="fConcepto" class="in" name="concepto" list="concList" value="${esc(m.concepto)}" placeholder="Ej.: carnicería, Ale, nafta">
       <datalist id="concList">${conceptos.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
@@ -326,7 +365,7 @@ function openMovForm(opts) {
       <input type="hidden" name="tipo" value="${esc(tipo)}">
       <div class="btns">${isNew ? `<button type="button" class="btn secondary" data-action="close-sheet">Cancelar</button>` : `<button type="button" class="btn danger" data-action="delete-mov" data-id="${esc(m.id)}">Borrar</button>`}<button class="btn" type="submit">Guardar</button></div>
     </form>`);
-  setTimeout(() => { const el = document.getElementById('fMonto'); if (el && isNew) el.focus(); }, 60);
+  setTimeout(() => { const el = document.getElementById('fMonto'); if (el && isNew) el.focus(); cuotaInfo(); }, 60);
 }
 function saveMovForm(form) {
   const fd = new FormData(form);
@@ -336,6 +375,24 @@ function saveMovForm(form) {
   if (fd.get('reintegro')) monto = -monto;
   const cuentaId = fd.get('cuenta');
   if (!cuentaId) { toast('Elegí el medio de pago'); return; }
+  // Compra en cuotas con tarjeta: se crean las cuotas como consumos fijos de la tarjeta
+  const nCuotas = parseInt(fd.get('cuotas'), 10) || 1;
+  const card = cuenta(cuentaId);
+  if (nCuotas > 1 && card && card.tipo === 'tarjeta' && monto > 0) {
+    const primera = String(fd.get('primera') || addMonths(monthKey(today()), 1)).slice(0, 7);
+    const concepto = String(fd.get('concepto') || '').trim() || fd.get('categoria');
+    const valor = Math.round(monto / nCuotas * 100) / 100;
+    put('Fijos', {
+      id: 'c-' + uid(), concepto: concepto + ' (' + nCuotas + ' cuotas)', categoria: fd.get('categoria'), tipo: 'Gasto',
+      monto: valor, moneda: fd.get('moneda'), dia: num(card.dia_vencimiento) || 7, meses: '', cuenta: cuentaId,
+      desde: primera + '-01', hasta: addMonths(primera, nCuotas - 1) + '-01', activo: 1
+    });
+    settings.lastMedio[fd.get('categoria')] = cuentaId; saveSettings();
+    closeSheet();
+    toast(nCuotas + ' cuotas de ' + money(valor, fd.get('moneda')) + ' en ' + card.nombre + ', desde el resumen de ' + monthName(primera));
+    render();
+    return;
+  }
   const id = fd.get('id');
   const base = data.Movimientos[id] || newMov({ id });
   const m = Object.assign({}, base, {
@@ -452,7 +509,7 @@ function openGroup(key) {
       <ul class="list" style="margin-top:8px">${g.items.map(p => `
         <li data-item="${esc(p.key)}">
           <input type="checkbox" class="gsel" checked style="width:20px;height:20px;flex:none" aria-label="Incluir ${esc(p.f.concepto)}">
-          <div class="grow"><div class="t">${esc(p.f.concepto)}</div><div class="s">${esc(p.f.categoria)}</div></div>
+          <div class="grow"><div class="t">${esc(nombreCuota(p.f, g.mk))}</div><div class="s">${esc(p.f.categoria)}</div></div>
           <input class="in gmonto" inputmode="decimal" value="${num(p.f.monto) ? esc(String(num(p.f.monto)).replace('.', ',')) : ''}" placeholder="Monto" style="width:120px;text-align:right">
           <span class="tag">${esc(p.f.moneda || 'ARS')}</span>
         </li>`).join('')}</ul>
@@ -487,7 +544,7 @@ function saveGroup(form) {
       sinMonto++;
       return;
     }
-    nuevos.push(newMov({ tipo: 'Gasto', categoria: p.f.categoria, concepto: p.f.concepto, monto: v, moneda: p.f.moneda || 'ARS', cuenta: p.f.cuenta, fecha, fijo_id: p.key }));
+    nuevos.push(newMov({ tipo: 'Gasto', categoria: p.f.categoria, concepto: nombreCuota(p.f, g.mk), monto: v, moneda: p.f.moneda || 'ARS', cuenta: p.f.cuenta, fecha, fijo_id: p.key }));
   });
   if (!nuevos.length) { toast('No hay consumos seleccionados'); return; }
   putMany('Movimientos', nuevos);
@@ -519,7 +576,7 @@ function viewPanel() {
     <div class="kpi"><div class="l">Disponible</div><div class="v">${money(r.disponible)}</div><div class="d">Efectivo, bancos y billeteras</div></div>
     <div class="kpi"><div class="l">Invertido</div><div class="v">${money(r.invertido)}</div><div class="d">FCI y Balanz</div></div>
     <div class="kpi"><div class="l">Dólares</div><div class="v">${money(r.usd, 'USD')}</div><div class="d">≈ ${money(r.usd * cot())}</div></div>
-    <div class="kpi"><div class="l">Comprometido en tarjetas</div><div class="v ${r.tarjetasARS > 0 ? 'neg' : ''}">${money(r.tarjetasARS)}</div><div class="d">${r.tarjetasUSD > 0 ? '+ ' + money(r.tarjetasUSD, 'USD') : 'Próximos resúmenes'}</div></div>
+    <div class="kpi"><div class="l">Comprometido en tarjetas</div><div class="v ${r.tarjetasARS > 0 ? 'neg' : ''}">${money(r.tarjetasARS)}</div><div class="d">${r.tarjetasUSD > 0 ? '+ ' + money(r.tarjetasUSD, 'USD') + ' · ' : ''}Cuotas futuras: ${money(cuotasFuturas())}</div></div>
   </div>`;
   html += `<div class="card"><h2>Resultado del mes</h2>
     <div class="row between"><span>Ingresos</span><span class="amt pos">${money(ing)}</span></div>
@@ -608,6 +665,7 @@ function openAccount(id) {
     <h3>${esc(c.nombre)}</h3>
     <p class="muted small" style="margin-top:0">${TIPOS_CUENTA[c.tipo] || c.tipo} · Saldo calculado: <b>${isCard ? money(-s.ARS) + ' de deuda' : money(s[curMon], curMon)}</b>${!isCard && c.moneda !== 'USD' && s.USD ? ' · ' + money(s.USD, 'USD') : ''}</p>
     ${isCard ? `<button class="btn" data-action="pay-card-direct" data-id="${esc(id)}">Pagar resumen</button>` : ''}
+    ${isCard ? listaCuotas(id) : ''}
     <form id="adjForm" autocomplete="off">
       <input type="hidden" name="id" value="${esc(id)}">
       <label class="f">${isCard ? 'Deuda real de la tarjeta' : 'Saldo real hoy'}</label>
@@ -617,6 +675,16 @@ function openAccount(id) {
       <select class="in" name="motivo">${['Saldo inicial', 'Rendimiento', 'Corrección'].map(x => `<option ${x === motivoDef ? 'selected' : ''}>${x}</option>`).join('')}</select>
       <div class="btns"><button type="button" class="btn secondary" data-action="edit-account" data-id="${esc(id)}">Editar cuenta</button><button class="btn" type="submit">Ajustar saldo</button></div>
     </form>`);
+}
+function listaCuotas(cardId) {
+  const mk = monthKey(today());
+  const l = fijos().filter(f => f.cuenta === cardId && f.hasta && monthKey(f.hasta) >= mk);
+  if (!l.length) return '';
+  return `<div class="card" style="margin-top:12px;padding:6px 12px"><h2 style="margin:8px 0 2px">Compras en cuotas</h2><ul class="list">` + l.map(f => {
+    const n = f.desde ? mesesEntre(monthKey(f.desde), monthKey(f.hasta)) + 1 : '';
+    return `<li><div class="grow"><div class="t">${esc(String(f.concepto).replace(/ \(\d+ cuotas\)$/, ''))}</div><div class="s">${money(f.monto, f.moneda)} por mes · hasta ${esc(monthName(monthKey(f.hasta)))}${n ? ' · ' + n + ' cuotas' : ''}</div></div>
+      ${String(f.id).startsWith('c-') ? `<button class="btn small danger" data-action="cancel-cuotas" data-id="${esc(f.id)}">Anular</button>` : ''}</li>`;
+  }).join('') + `</ul><p class="small muted" style="margin:6px 0">Pendiente total en cuotas: <b>${money(cuotasFuturas(cardId))}</b></p></div>`;
 }
 function saveAdjust(form) {
   const fd = new FormData(form);
@@ -810,6 +878,8 @@ document.addEventListener('click', e => {
   if (chip) {
     chip.parentElement.querySelectorAll('.chip').forEach(x => x.classList.toggle('active', x === chip));
     chip.closest('form').querySelector('input[name="cuenta"]').value = chip.dataset.medio;
+    const box = document.getElementById('cuotasBox');
+    if (box) { const c = cuenta(chip.dataset.medio); box.hidden = !(c && c.tipo === 'tarjeta'); cuotaInfo(); }
     return;
   }
   const a = e.target.closest('[data-action]');
@@ -837,6 +907,12 @@ document.addEventListener('click', e => {
     const f = p.f;
     if (f.tipo === 'Transferencia') openTransferForm({ desde: f.cuenta, monto: f.monto, concepto: f.concepto, fijo_id: p.key, fecha: p.fecha <= today() ? today() : p.fecha });
     else openMovForm({ tipo: f.tipo || 'Gasto', categoria: f.categoria, concepto: f.concepto, monto: f.monto, moneda: f.moneda || 'ARS', cuenta: f.cuenta, fijo_id: p.key, fecha: p.fecha <= today() ? today() : p.fecha });
+  }
+  else if (act === 'cancel-cuotas') {
+    const f = data.Fijos[a.dataset.id];
+    if (f && confirm('¿Anular la compra en cuotas "' + f.concepto + '"? Las cuotas ya registradas no se modifican.')) {
+      put('Fijos', Object.assign({}, f, { activo: 0 })); closeSheet(); toast('Compra en cuotas anulada'); render();
+    }
   }
   else if (act === 'open-group') openGroup(a.dataset.key);
   else if (act === 'skip-group') skipGroup(a.dataset.key);
@@ -875,6 +951,7 @@ document.addEventListener('change', e => {
 });
 document.addEventListener('input', e => {
   if (e.target.classList && e.target.classList.contains('gmonto')) { grpTotal(); return; }
+  if (['fCuotas', 'fMonto', 'fPrimera'].includes(e.target.id)) { cuotaInfo(); return; }
   const k = e.target.dataset && e.target.dataset.input;
   if (k === 'movFilter') {
     ui.movFilter = e.target.value;
