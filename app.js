@@ -1,7 +1,7 @@
 'use strict';
 /* Mis Finanzas — app de carga de gastos e ingresos, sin conexión, sincronizada con Google Sheets */
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.2.1';
 const LS_DATA = 'fin.data.v1';
 const LS_SET = 'fin.settings.v1';
 const TABLES = ['Movimientos', 'Cuentas', 'Categorias', 'Fijos', 'Config'];
@@ -444,7 +444,7 @@ function openGroup(key) {
   const hoy = today();
   sheet(`
     <h3>Resumen ${esc(g.c.nombre)} · ${esc(monthName(g.mk))}</h3>
-    <p class="muted small" style="margin-top:0">Ajustá cada monto según el resumen. Los que destildes quedan pendientes. Después de registrarlos, pagá el resumen desde Pendientes.</p>
+    <p class="muted small" style="margin-top:0">Ajustá cada monto según el resumen (por ejemplo, completá impuestos y recargos). Los que dejes sin monto se dan por resueltos; los que destildes quedan pendientes. Después de registrarlos, pagá el resumen desde Pendientes.</p>
     <form id="grpForm" autocomplete="off">
       <input type="hidden" name="key" value="${esc(g.key)}">
       <label class="f">Fecha del resumen</label>
@@ -453,7 +453,7 @@ function openGroup(key) {
         <li data-item="${esc(p.key)}">
           <input type="checkbox" class="gsel" checked style="width:20px;height:20px;flex:none" aria-label="Incluir ${esc(p.f.concepto)}">
           <div class="grow"><div class="t">${esc(p.f.concepto)}</div><div class="s">${esc(p.f.categoria)}</div></div>
-          <input class="in gmonto" inputmode="decimal" value="${esc(String(num(p.f.monto)).replace('.', ','))}" style="width:120px;text-align:right">
+          <input class="in gmonto" inputmode="decimal" value="${num(p.f.monto) ? esc(String(num(p.f.monto)).replace('.', ',')) : ''}" placeholder="Monto" style="width:120px;text-align:right">
           <span class="tag">${esc(p.f.moneda || 'ARS')}</span>
         </li>`).join('')}</ul>
       <div class="row between" style="margin-top:10px"><b>Total</b><b class="amt" id="grpTotal">${money(g.total)}</b></div>
@@ -476,16 +476,23 @@ function saveGroup(form) {
   const g = findGroup(form.querySelector('[name="key"]').value); if (!g) { closeSheet(); return; }
   const fecha = form.querySelector('[name="fecha"]').value || today();
   const nuevos = [];
+  let sinMonto = 0;
   form.querySelectorAll('[data-item]').forEach(li => {
     if (!li.querySelector('.gsel').checked) return;
     const p = g.items.find(x => x.key === li.dataset.item); if (!p) return;
     const v = parseMonto(li.querySelector('.gmonto').value);
-    if (!isFinite(v) || v === 0) return;
+    if (!isFinite(v) || v === 0) {
+      // Tildado pero sin monto (por ejemplo, sin recargos ese mes): se da por resuelto
+      nuevos.push(newMov({ tipo: 'Omitido', categoria: p.f.categoria, concepto: p.f.concepto, monto: 0, cuenta: p.f.cuenta, fecha, fijo_id: p.key }));
+      sinMonto++;
+      return;
+    }
     nuevos.push(newMov({ tipo: 'Gasto', categoria: p.f.categoria, concepto: p.f.concepto, monto: v, moneda: p.f.moneda || 'ARS', cuenta: p.f.cuenta, fecha, fijo_id: p.key }));
   });
   if (!nuevos.length) { toast('No hay consumos seleccionados'); return; }
   putMany('Movimientos', nuevos);
-  closeSheet(); toast(nuevos.length + ' consumos registrados en ' + g.c.nombre); render();
+  const reg = nuevos.length - sinMonto;
+  closeSheet(); toast(reg + ' consumos registrados en ' + g.c.nombre + (sinMonto ? ' (' + sinMonto + ' sin monto)' : '')); render();
 }
 function skipGroup(key) {
   const g = findGroup(key); if (!g) return;
