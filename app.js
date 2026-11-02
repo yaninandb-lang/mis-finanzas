@@ -1,7 +1,7 @@
 'use strict';
 /* Mis Finanzas — app de carga de gastos e ingresos, sin conexión, sincronizada con Google Sheets */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 const LS_DATA = 'fin.data.v1';
 const LS_SET = 'fin.settings.v1';
 const TABLES = ['Movimientos', 'Cuentas', 'Categorias', 'Fijos', 'Config'];
@@ -88,7 +88,7 @@ let toastTimer;
 function toast(msg) {
   const el = document.getElementById('toast');
   el.textContent = msg; el.classList.add('show');
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), Math.min(9000, 2200 + msg.length * 35));
 }
 
 /* ---------- Acceso a datos ---------- */
@@ -655,20 +655,32 @@ async function sync() {
   });
   try {
     const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 45000);
-    const res = await fetch(settings.url, { method: 'POST', body: JSON.stringify({ token: settings.token, changes }), signal: ctrl.signal, redirect: 'follow' });
-    clearTimeout(to);
-    const j = await res.json();
-    if (!j.ok) throw new Error(j.error || 'Respuesta inválida');
+    let res;
+    try {
+      res = await fetch(settings.url, { method: 'POST', body: JSON.stringify({ token: settings.token, changes }), signal: ctrl.signal, redirect: 'follow' });
+    } catch (netErr) {
+      if (netErr.name === 'AbortError') throw netErr;
+      throw new Error('No se pudo conectar con la URL. Revisá que sea la URL de la aplicación web (termina en /exec) y que el acceso sea "Cualquier usuario".');
+    } finally { clearTimeout(to); }
+    const text = await res.text();
+    let j;
+    try { j = JSON.parse(text); }
+    catch (pe) { throw new Error('La URL respondió, pero no es el servicio de Mis Finanzas. Revisá que copiaste la URL que termina en /exec y que la implementación tenga acceso "Cualquier usuario".'); }
+    if (!j.ok) throw new Error(j.error === 'Clave incorrecta' ? 'Clave incorrecta: copiala de nuevo desde Apps Script (función mostrarClave).' : (j.error || 'Respuesta inválida'));
     TABLES.forEach(t => {
+      const server = j.data[t] || [];
+      // Planilla vacía en esta tabla: se conservan los datos del teléfono y se suben en la próxima sincronización
+      if (!server.length) {
+        Object.keys(data[t]).forEach(id => { data.dirty[t][id] = true; });
+        return;
+      }
       const fresh = {};
-      (j.data[t] || []).forEach(r => { fresh[String(r.id)] = normalize(t, r); });
+      server.forEach(r => { fresh[String(r.id)] = normalize(t, r); });
       Object.keys(data.dirty[t] || {}).forEach(id => {
         const local = data[t][id];
         if (local && (!sent[t] || sent[t][id] !== local.modificado)) fresh[id] = local; // editado durante la subida
         else delete data.dirty[t][id];
       });
-      // Si la planilla todavía no tiene categorías o config, se conservan las locales
-      if ((t === 'Categorias' || t === 'Config') && !(j.data[t] || []).length) return;
       data[t] = fresh;
     });
     data.lastSync = Date.now(); ui.lastError = '';
@@ -711,7 +723,10 @@ document.addEventListener('click', e => {
   else if (act === 'delete-mov') { const m = data.Movimientos[a.dataset.id]; if (m && confirm('¿Borrar este movimiento?')) { put('Movimientos', Object.assign({}, m, { borrado: 1 })); closeSheet(); toast('Movimiento borrado'); render(); } }
   else if (act === 'close-sheet') closeSheet();
   else if (act === 'month') { ui.month = addMonths(ui.month, Number(a.dataset.v)); render(); }
-  else if (act === 'sync') { if (!settings.url) openSettings(); else sync(); }
+  else if (act === 'sync') {
+    if (!settings.url) openSettings();
+    else sync().then(() => toast(ui.lastError ? 'Error al sincronizar: ' + ui.lastError : 'Sincronizado'));
+  }
   else if (act === 'settings') openSettings();
   else if (act === 'export') exportCSV();
   else if (act === 'import') document.getElementById('importFile').click();
