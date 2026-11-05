@@ -1,7 +1,7 @@
 'use strict';
 /* Mis Finanzas — app de carga de gastos e ingresos, sin conexión, sincronizada con Google Sheets */
 
-const APP_VERSION = '1.3.1';
+const APP_VERSION = '1.3.2';
 const LS_DATA = 'fin.data.v1';
 const LS_SET = 'fin.settings.v1';
 const TABLES = ['Movimientos', 'Cuentas', 'Categorias', 'Fijos', 'Config'];
@@ -734,7 +734,7 @@ function openSettings() {
       <input class="in" name="token" value="${esc(settings.token)}" placeholder="La clave que te mostró la función setup">
       <label class="f">Cotización del dólar (para convertir a pesos en los reportes)</label>
       <input class="in" name="cot" inputmode="decimal" value="${esc(String(cot()).replace('.', ','))}">
-      <div class="small muted" style="margin-top:6px">${data.Config.cotizacion_info ? 'Automática: ' + esc(data.Config.cotizacion_info.valor) + '. Se actualiza sola cada mañana.' : 'Carga manual. Se puede automatizar desde la planilla (función instalarActualizacionDiaria).'}</div>
+      <div class="small muted" style="margin-top:6px">${data.Config.cotizacion_info ? 'Automática: ' + esc(data.Config.cotizacion_info.valor) + '. Se actualiza sola una vez por día al abrir la app.' : 'Se actualiza sola una vez por día al abrir la app con conexión (dólar MEP compra, cierre del día anterior).'}</div>
       <div class="btns"><button type="button" class="btn secondary" data-action="close-sheet">Cerrar</button><button class="btn" type="submit">Guardar</button></div>
     </form>
     <div class="card" style="margin-top:16px">
@@ -967,7 +967,31 @@ function openAdjInfo(m) {
     <p>${esc(m.concepto)}<br><span class="muted small">${esc(m.categoria || '')} · ${shortDate(m.fecha)} · ${money(m.monto, m.moneda)}</span></p>
     <div class="btns"><button class="btn secondary" data-action="close-sheet">Cerrar</button><button class="btn danger" data-action="delete-mov" data-id="${esc(m.id)}">Borrar</button></div>`);
 }
-window.addEventListener('online', () => { refreshChrome(); sync(); });
+/* ---------- Cotización automática: dólar MEP compra, cierre del día hábil anterior ----------
+   Fuente: ArgentinaDatos (servicio público). Se consulta una vez por día y se guarda en Config,
+   así queda también en la planilla. */
+async function autoCotizacion() {
+  const hoy = today();
+  if (settings.cotCheck === hoy || !navigator.onLine) return;
+  for (let i = 1; i <= 7; i++) {
+    const f = addDays(hoy, -i);
+    try {
+      const res = await fetch('https://api.argentinadatos.com/v1/cotizaciones/dolares/bolsa/' + f.replace(/-/g, '/'));
+      if (!res.ok) continue;
+      const j = await res.json();
+      const v = num(j.compra);
+      if (!(v > 0)) continue;
+      const info = 'Dólar MEP compra · cierre del ' + f.split('-').reverse().join('/');
+      settings.cotCheck = hoy; saveSettings();
+      if (v !== cot() || !data.Config.cotizacion_info || data.Config.cotizacion_info.valor !== info) {
+        putMany('Config', [{ id: 'cotizacion_usd', valor: String(v) }, { id: 'cotizacion_info', valor: info }]);
+        if (document.getElementById('sheetWrap').hidden) render();
+      }
+      return;
+    } catch (e) { return; /* sin conexión o servicio caído: se reintenta en la próxima apertura */ }
+  }
+}
+window.addEventListener('online', () => { refreshChrome(); sync(); autoCotizacion(); });
 window.addEventListener('offline', refreshChrome);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') sync(); });
 
@@ -977,3 +1001,4 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
 }
 render();
 sync();
+autoCotizacion();
