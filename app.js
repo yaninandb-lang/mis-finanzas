@@ -1,7 +1,7 @@
 'use strict';
 /* Mis Finanzas — app de carga de gastos e ingresos, sin conexión, sincronizada con Google Sheets */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 const LS_DATA = 'fin.data.v1';
 const LS_SET = 'fin.settings.v1';
 const TABLES = ['Movimientos', 'Cuentas', 'Categorias', 'Fijos', 'Config'];
@@ -734,6 +734,7 @@ function openSettings() {
       <input class="in" name="token" value="${esc(settings.token)}" placeholder="La clave que te mostró la función setup">
       <label class="f">Cotización del dólar (para convertir a pesos en los reportes)</label>
       <input class="in" name="cot" inputmode="decimal" value="${esc(String(cot()).replace('.', ','))}">
+      <div class="small muted" style="margin-top:6px">${data.Config.cotizacion_info ? 'Automática: ' + esc(data.Config.cotizacion_info.valor) + '. Se actualiza sola cada mañana.' : 'Carga manual. Se puede automatizar desde la planilla (función instalarActualizacionDiaria).'}</div>
       <div class="btns"><button type="button" class="btn secondary" data-action="close-sheet">Cerrar</button><button class="btn" type="submit">Guardar</button></div>
     </form>
     <div class="card" style="margin-top:16px">

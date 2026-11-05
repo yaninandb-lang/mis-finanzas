@@ -38,6 +38,48 @@ function setup() {
   return token;
 }
 
+/* ---------- Cotización del dólar automática ----------
+   Toma el cierre del día hábil anterior desde ArgentinaDatos (servicio público y gratuito)
+   y lo guarda en la hoja Config. La app lo usa para pasar dólares a pesos.
+   Para activarlo: ejecutar una vez "instalarActualizacionDiaria". */
+const COTIZACION = { casa: 'bolsa', lado: 'compra', nombre: 'Dólar MEP compra' };
+
+function actualizarCotizacion() {
+  const tz = Session.getScriptTimeZone();
+  for (let i = 1; i <= 7; i++) {
+    const d = new Date(Date.now() - i * 86400000);
+    const url = 'https://api.argentinadatos.com/v1/cotizaciones/dolares/' + COTIZACION.casa + '/' + Utilities.formatDate(d, tz, 'yyyy/MM/dd');
+    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) continue;
+    const j = JSON.parse(res.getContentText());
+    const v = Number(j[COTIZACION.lado]);
+    if (!(v > 0)) continue;
+    const ahora = Date.now();
+    const lock = LockService.getScriptLock();
+    lock.waitLock(25000);
+    try {
+      upsert_('Config', [
+        { id: 'cotizacion_usd', valor: String(v), modificado: ahora },
+        { id: 'cotizacion_info', valor: COTIZACION.nombre + ' · cierre del ' + Utilities.formatDate(d, tz, 'dd/MM/yyyy'), modificado: ahora }
+      ]);
+    } finally {
+      lock.releaseLock();
+    }
+    Logger.log('Cotización actualizada: ' + v + ' (' + COTIZACION.nombre + ', ' + Utilities.formatDate(d, tz, 'dd/MM/yyyy') + ')');
+    return v;
+  }
+  throw new Error('No se pudo obtener la cotización de los últimos 7 días');
+}
+
+function instalarActualizacionDiaria() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'actualizarCotizacion') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('actualizarCotizacion').timeBased().everyDays(1).atHour(9).create();
+  actualizarCotizacion();
+  Logger.log('Listo: la cotización se va a actualizar todos los días entre las 9 y las 10.');
+}
+
 function mostrarClave() {
   Logger.log('Tu clave de sincronización es: ' + PropertiesService.getScriptProperties().getProperty(TOKEN_PROP));
 }
