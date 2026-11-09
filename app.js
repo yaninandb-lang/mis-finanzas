@@ -1,7 +1,7 @@
 'use strict';
 /* Mis Finanzas — app de carga de gastos e ingresos, sin conexión, sincronizada con Google Sheets */
 
-const APP_VERSION = '1.3.2';
+const APP_VERSION = '1.3.3';
 const LS_DATA = 'fin.data.v1';
 const LS_SET = 'fin.settings.v1';
 const TABLES = ['Movimientos', 'Cuentas', 'Categorias', 'Fijos', 'Config'];
@@ -139,8 +139,13 @@ function balances() {
     else if (m.tipo === 'Transferencia') {
       add(m.cuenta, m.moneda, -v);
       const dest = cuenta(m.cuenta_destino);
-      const md = m.monto_destino === '' || m.monto_destino === undefined ? v : num(m.monto_destino);
-      add(m.cuenta_destino, dest ? dest.moneda : m.moneda, md);
+      const conCambio = !(m.monto_destino === '' || m.monto_destino === undefined || m.monto_destino === null);
+      const md = conCambio ? num(m.monto_destino) : v;
+      // Moneda que entra: en tarjetas (que tienen deuda en pesos y en dólares) sin cambio es la misma que sale;
+      // con cambio, es la otra (por ejemplo, pagar con pesos la deuda en dólares). En el resto, la moneda de la cuenta.
+      let monDest = dest ? dest.moneda : m.moneda;
+      if (dest && dest.tipo === 'tarjeta') monDest = conCambio ? (m.moneda === 'USD' ? 'ARS' : 'USD') : m.moneda;
+      add(m.cuenta_destino, monDest, md);
     }
   });
   return b;
